@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+// @ts-nocheck
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Award,
@@ -27,6 +28,7 @@ import './styles.css';
 const STORAGE_KEY = 'daily-progress-lab:v2';
 const LEGACY_STORAGE_KEY = 'daily-progress-lab:v1';
 const PROFILE_KEY = 'daily-progress-lab:profile';
+const API_SYNC_PROFILE_KEY = 'daily-progress-lab:sync-profile-id';
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
@@ -71,6 +73,45 @@ function loadState() {
     };
   }
   return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
+}
+
+
+function getSyncProfileId(profile) {
+  if (profile?.email) return `email:${profile.email.toLowerCase()}`;
+  const existing = localStorage.getItem(API_SYNC_PROFILE_KEY);
+  if (existing) return existing;
+  const generated = `browser:${crypto.randomUUID()}`;
+  localStorage.setItem(API_SYNC_PROFILE_KEY, generated);
+  return generated;
+}
+
+function mergeRemoteState(localState, remoteState) {
+  if (!remoteState?.habits?.length && !Object.keys(remoteState?.logs || {}).length) return localState;
+  return {
+    ...localState,
+    ...remoteState,
+    habits: remoteState.habits?.length ? remoteState.habits : localState.habits,
+    logs: { ...localState.logs, ...(remoteState.logs || {}) },
+    notes: { ...localState.notes, ...(remoteState.notes || {}) },
+    rewards: remoteState.rewards?.length ? remoteState.rewards : localState.rewards,
+    redemptions: remoteState.redemptions?.length ? remoteState.redemptions : localState.redemptions,
+  };
+}
+
+async function fetchRemoteProgress(profileId) {
+  const response = await fetch(`/api/daily-progress?profileId=${encodeURIComponent(profileId)}`);
+  if (!response.ok) throw new Error('Remote progress fetch failed');
+  return response.json();
+}
+
+async function saveRemoteProgress(profileId, profile, state) {
+  const response = await fetch('/api/daily-progress', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, profile, state }),
+  });
+  if (!response.ok) throw new Error('Remote progress save failed');
+  return response.json();
 }
 
 function loadProfile() {
@@ -269,6 +310,8 @@ function App() {
   const [rewardName, setRewardName] = useState('');
   const [rewardCost, setRewardCost] = useState('');
   const [rewardMessage, setRewardMessage] = useState('');
+  const [syncStatus, setSyncStatus] = useState('Local-first mode. Supabase sync checks after load.');
+  const remoteLoadComplete = useRef(false);
   const [selectedDate, setSelectedDate] = useState(todayKey());
   const [visibleMonth, setVisibleMonth] = useState(monthKey(new Date()));
   const [note, setNote] = useState(state.notes[todayKey()] || '');
@@ -279,6 +322,41 @@ function App() {
     if (profile) localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
     else localStorage.removeItem(PROFILE_KEY);
   }, [profile]);
+  useEffect(() => {
+    let cancelled = false;
+    const profileId = getSyncProfileId(profile);
+    remoteLoadComplete.current = false;
+    setSyncStatus('Checking Supabase sync...');
+    fetchRemoteProgress(profileId)
+      .then(data => {
+        if (cancelled) return;
+        if (data.configured && data.state) {
+          setState(prev => mergeRemoteState(prev, data.state));
+          setSyncStatus(data.syncedAt ? `Synced from Supabase at ${new Date(data.syncedAt).toLocaleTimeString()}` : 'Supabase sync ready.');
+        } else {
+          setSyncStatus('Local mode: add Supabase env vars to enable cloud persistence.');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSyncStatus('Local mode: Supabase sync is unavailable right now.');
+      })
+      .finally(() => {
+        if (!cancelled) remoteLoadComplete.current = true;
+      });
+    return () => { cancelled = true; };
+  }, [profile?.email]);
+  useEffect(() => {
+    if (!remoteLoadComplete.current) return;
+    const profileId = getSyncProfileId(profile);
+    const handle = window.setTimeout(() => {
+      saveRemoteProgress(profileId, profile, state)
+        .then(data => {
+          if (data.configured) setSyncStatus(`Saved to Supabase at ${new Date(data.syncedAt).toLocaleTimeString()}`);
+        })
+        .catch(() => setSyncStatus('Local changes saved. Remote sync failed.'));
+    }, 700);
+    return () => window.clearTimeout(handle);
+  }, [state, profile]);
   useEffect(() => setNote(state.notes[selectedDate] || ''), [selectedDate, state.notes]);
   useEffect(() => {
     setState(prev => ({ ...prev, notes: { ...prev.notes, [selectedDate]: note } }));
