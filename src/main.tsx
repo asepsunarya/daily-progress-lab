@@ -31,6 +31,7 @@ const PROFILE_KEY = 'daily-progress-lab:profile';
 const API_SYNC_PROFILE_KEY = 'daily-progress-lab:sync-profile-id';
 const BACKUP_VERSION = 1;
 const XP_AWARD_VERSION = 1;
+const BADGE_STORAGE_VERSION = 1;
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
@@ -44,6 +45,14 @@ const defaultHabits = [
   { id: crypto.randomUUID(), title: 'Deep work / belajar', points: 25, color: '#7c3aed' },
   { id: crypto.randomUUID(), title: 'Olahraga / jalan kaki', points: 20, color: '#059669' },
   { id: crypto.randomUUID(), title: 'Jurnal progress', points: 15, color: '#ea580c' },
+];
+const badgeDefinitions = [
+  { id: 'first-xp', icon: Sparkles, name: 'First XP', requirement: 'Dapatkan XP pertamamu', unlockedWhen: ({ stats }) => stats.totalXp > 0 },
+  { id: 'streak-3', icon: Flame, name: '3-day streak', requirement: 'Jaga streak 3 hari', unlockedWhen: ({ stats, insights }) => stats.streak >= 3 || insights.longestStreak >= 3 },
+  { id: 'streak-7', icon: Trophy, name: '7-day streak', requirement: 'Jaga streak 7 hari', unlockedWhen: ({ stats, insights }) => stats.streak >= 7 || insights.longestStreak >= 7 },
+  { id: 'consistency-30', icon: CalendarDays, name: '30-day consistency', requirement: 'Catat 30 hari aktif', unlockedWhen: ({ stats, insights }) => stats.activeDays >= 30 || insights.totalCompletedDays >= 30 },
+  { id: 'level-5', icon: Award, name: 'Level 5', requirement: 'Capai level 5', unlockedWhen: ({ stats }) => stats.level.level >= 5 },
+  { id: 'level-10', icon: Zap, name: 'Level 10', requirement: 'Capai level 10', unlockedWhen: ({ stats }) => stats.level.level >= 10 },
 ];
 
 function toDateKey(date) {
@@ -72,10 +81,11 @@ function loadState() {
       freezeCount: Number.isFinite(parsed.freezeCount) ? parsed.freezeCount : DEFAULT_FREEZE_COUNT,
       rewards: Array.isArray(parsed.rewards) ? parsed.rewards : defaultRewards,
       redemptions: Array.isArray(parsed.redemptions) ? parsed.redemptions : [],
+      badges: normalizeBadgeState(parsed.badges),
     };
     return { ...base, xp: normalizeXpState(parsed.xp, base.logs, base.habits) };
   }
-  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [], xp: emptyXpState() };
+  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [], xp: emptyXpState(), badges: emptyBadgeState() };
 }
 
 
@@ -102,6 +112,7 @@ function mergeRemoteState(localState, remoteState) {
     notes: { ...localState.notes, ...(remoteState.notes || {}) },
     rewards: remoteState.rewards?.length ? remoteState.rewards : localState.rewards,
     redemptions: remoteState.redemptions?.length ? remoteState.redemptions : localState.redemptions,
+    badges: mergeBadgeState(localState.badges, remoteState.badges),
     xp: localXp.total >= remoteXp.total ? localXp : remoteXp,
   };
 }
@@ -149,6 +160,7 @@ function validateBackup(payload) {
   if (state.freezeCount !== undefined && !Number.isFinite(state.freezeCount)) return 'Jumlah streak freeze di file backup tidak valid.';
   if (state.rewards !== undefined && !Array.isArray(state.rewards)) return 'Daftar reward di file backup tidak valid.';
   if (state.redemptions !== undefined && !Array.isArray(state.redemptions)) return 'Riwayat redeem di file backup tidak valid.';
+  if (state.badges !== undefined && (!isPlainObject(state.badges) || !Array.isArray(state.badges.unlockedIds))) return 'Data badge di file backup tidak valid.';
   if (state.xp !== undefined && (!isPlainObject(state.xp) || !Number.isFinite(state.xp.total) || !Array.isArray(state.xp.awardedKeys))) return 'Data XP di file backup tidak valid.';
 
   const invalidHabit = state.habits.some(habit => !isPlainObject(habit) || typeof habit.id !== 'string' || typeof habit.title !== 'string' || !Number.isFinite(habit.points));
@@ -174,8 +186,28 @@ function normalizeBackupState(importedState) {
     freezeCount: Number.isFinite(importedState.freezeCount) ? importedState.freezeCount : DEFAULT_FREEZE_COUNT,
     rewards: Array.isArray(importedState.rewards) ? importedState.rewards : defaultRewards,
     redemptions: Array.isArray(importedState.redemptions) ? importedState.redemptions : [],
+    badges: normalizeBadgeState(importedState.badges),
     xp: normalizeXpState(importedState.xp, importedState.logs, importedState.habits),
   };
+}
+
+function emptyBadgeState() {
+  return { version: BADGE_STORAGE_VERSION, unlockedIds: [] };
+}
+
+function normalizeBadgeState(badges) {
+  if (!badges || !Array.isArray(badges.unlockedIds)) return emptyBadgeState();
+  const validIds = new Set(badgeDefinitions.map(badge => badge.id));
+  return {
+    version: BADGE_STORAGE_VERSION,
+    unlockedIds: [...new Set(badges.unlockedIds.filter(id => validIds.has(id)))],
+  };
+}
+
+function mergeBadgeState(localBadges, remoteBadges) {
+  const local = normalizeBadgeState(localBadges).unlockedIds;
+  const remote = normalizeBadgeState(remoteBadges).unlockedIds;
+  return { version: BADGE_STORAGE_VERSION, unlockedIds: [...new Set([...local, ...remote])] };
 }
 
 function emptyXpState() {
@@ -412,6 +444,7 @@ function App() {
   const [rewardName, setRewardName] = useState('');
   const [rewardCost, setRewardCost] = useState('');
   const [rewardMessage, setRewardMessage] = useState('');
+  const [badgeMessage, setBadgeMessage] = useState('');
   const [syncStatus, setSyncStatus] = useState('Local-first mode. Supabase sync checks after load.');
   const remoteLoadComplete = useRef(false);
   const [selectedDate, setSelectedDate] = useState(todayKey());
@@ -476,16 +509,36 @@ function App() {
     return { totalXp, spentXp, rewardBalance: Math.max(0, totalXp - spentXp), completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
   }, [state, today.completed.length]);
 
+  const badgeState = normalizeBadgeState(state.badges);
+  const badgeIdsKey = badgeState.unlockedIds.join('|');
+  const unlockedBadgeIds = useMemo(() => new Set(badgeState.unlockedIds), [badgeIdsKey]);
+
   const monthReport = useMemo(() => getMonthReport(state, visibleMonth), [state, visibleMonth]);
   const insights = useMemo(() => getInsights(state), [state]);
   const monthDays = useMemo(() => getMonthDays(visibleMonth), [visibleMonth]);
 
-  const achievements = [
-    { icon: Flame, label: 'Streak 3 hari', done: stats.streak >= 3 },
-    { icon: Trophy, label: 'Level 3', done: stats.level.level >= 3 },
-    { icon: Award, label: '7 hari aktif', done: stats.activeDays >= 7 },
-    { icon: Sparkles, label: '100% hari ini', done: stats.dailyPercent === 100 },
-  ];
+  const achievements = useMemo(() => badgeDefinitions.map(badge => ({
+    ...badge,
+    unlocked: unlockedBadgeIds.has(badge.id),
+    eligible: badge.unlockedWhen({ stats, insights }),
+  })), [stats, insights, badgeIdsKey, unlockedBadgeIds]);
+
+  useEffect(() => {
+    const newlyUnlocked = achievements.filter(badge => badge.eligible && !unlockedBadgeIds.has(badge.id));
+    if (!newlyUnlocked.length) return;
+    setState(prev => {
+      const current = normalizeBadgeState(prev.badges);
+      const currentIds = new Set(current.unlockedIds);
+      const fresh = newlyUnlocked.filter(badge => !currentIds.has(badge.id));
+      if (!fresh.length) return prev;
+      return {
+        ...prev,
+        badges: { version: BADGE_STORAGE_VERSION, unlockedIds: [...current.unlockedIds, ...fresh.map(badge => badge.id)] },
+      };
+    });
+    setBadgeMessage(`Badge unlocked: ${newlyUnlocked.map(badge => badge.name).join(', ')}. Cantik, progress-nya kelihatan ✨`);
+    window.setTimeout(() => setBadgeMessage(''), 7000);
+  }, [achievements, unlockedBadgeIds]);
 
   function toggleHabit(id) {
     setState(prev => {
@@ -515,7 +568,7 @@ function App() {
 
   function resetDemo() {
     if (!confirm('Reset semua data lokal?')) return;
-    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [], xp: emptyXpState() };
+    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [], xp: emptyXpState(), badges: emptyBadgeState() };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     setState(fresh);
     setSelectedDate(todayKey());
@@ -709,6 +762,8 @@ function App() {
         </div>
       </section>
 
+      {badgeMessage && <section className="badge-toast panel" aria-live="polite"><Sparkles size={18}/><span>{badgeMessage}</span></section>}
+
       <section className="grid stats-grid five">
         <Stat icon={Target} label="Progress tanggal terpilih" value={`${stats.dailyPercent}%`} />
         <Stat icon={Flame} label="Streak" value={`${stats.streak} hari`} />
@@ -841,12 +896,14 @@ function App() {
       </section>
 
       <section className="panel achievement-panel">
-        <p className="eyebrow">Achievement</p>
-        <h2>Badge unlocked</h2>
-        <div className="badges">
-          {achievements.map(({ icon: Icon, label, done }) => <div className={`badge ${done ? 'unlocked' : ''}`} key={label}>
-            <Icon size={20}/><span>{label}</span>
-          </div>)}
+        <div className="section-head compact">
+          <div><p className="eyebrow"><Award size={16}/> Badge collection</p><h2>Achievements & milestones</h2></div>
+          <span className="empty-pill">{badgeState.unlockedIds.length}/{badgeDefinitions.length} unlocked</span>
+        </div>
+        <div className="badges collection">
+          {achievements.map(({ icon: Icon, id, name, requirement, unlocked }) => <article className={`badge ${unlocked ? 'unlocked' : 'locked'}`} key={id}>
+            <Icon size={22}/><div><strong>{name}</strong><span>{unlocked ? 'Unlocked' : requirement}</span></div>
+          </article>)}
         </div>
       </section>
     </main>

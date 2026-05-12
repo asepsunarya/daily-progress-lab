@@ -126,3 +126,14 @@ textarea { min-height: 188px; resize: vertical; margin-top: 16px; line-height: 1
   font-size: 0.9rem;
   margin-top: 0.5rem;
 }
+.badge-toast { display: inline-flex; align-items: center; gap: 10px; padding: 14px 16px; margin-bottom: 16px; color: #fef3c7; border-color: rgba(245,158,11,.44); background: linear-gradient(135deg, rgba(245,158,11,.18), rgba(124,58,237,.18)); }
+.badges.collection { grid-template-columns: repeat(3, 1fr); }
+.badge { min-height: 74px; }
+.badge div { display: grid; gap: 4px; }
+.badge strong { color: inherit; }
+.badge span { color: #94a3b8; font-size: .9rem; line-height: 1.35; }
+.badge.unlocked span { color: #fde68a; }
+.badge.locked { filter: grayscale(.65); opacity: .72; }
+.badge.locked svg { color: #64748b; }
+@media (max-width: 980px) { .badges.collection { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .badges.collection { grid-template-columns: 1fr; } .badge-toast { align-items: flex-start; } }
