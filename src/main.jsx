@@ -7,13 +7,17 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Coins,
   Flame,
+  Gift,
   ShieldCheck,
   LogOut,
+  Pencil,
   Plus,
   RotateCcw,
   Sparkles,
   Target,
+  Trash2,
   Trophy,
   UserCircle2,
   Zap,
@@ -26,6 +30,11 @@ const PROFILE_KEY = 'daily-progress-lab:profile';
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
+const defaultRewards = [
+  { id: crypto.randomUUID(), name: 'Kopi favorit', cost: 80 },
+  { id: crypto.randomUUID(), name: 'Episode bebas rasa bersalah', cost: 120 },
+  { id: crypto.randomUUID(), name: 'Self-date kecil', cost: 250 },
+];
 const todayKey = () => toDateKey(new Date());
 const defaultHabits = [
   { id: crypto.randomUUID(), title: 'Deep work / belajar', points: 25, color: '#7c3aed' },
@@ -57,9 +66,11 @@ function loadState() {
       logs: parsed.logs,
       notes: parsed.notes || {},
       freezeCount: Number.isFinite(parsed.freezeCount) ? parsed.freezeCount : DEFAULT_FREEZE_COUNT,
+      rewards: Array.isArray(parsed.rewards) ? parsed.rewards : defaultRewards,
+      redemptions: Array.isArray(parsed.redemptions) ? parsed.redemptions : [],
     };
   }
-  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT };
+  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
 }
 
 function loadProfile() {
@@ -75,6 +86,10 @@ function habitXp(habits, id) {
 function logXp(log, habits) {
   const habitTotal = (log?.completed || []).reduce((sum, id) => sum + habitXp(habits, id), 0);
   return habitTotal + (log?.restDay ? REST_DAY_XP : 0);
+}
+
+function redemptionSpent(redemptions) {
+  return redemptions.reduce((sum, item) => sum + (Number(item.cost) || 0), 0);
 }
 
 function isProtectedLog(log) {
@@ -146,6 +161,9 @@ function App() {
   const [profile, setProfile] = useState(loadProfile);
   const [state, setState] = useState(loadState);
   const [habitTitle, setHabitTitle] = useState('');
+  const [rewardName, setRewardName] = useState('');
+  const [rewardCost, setRewardCost] = useState('');
+  const [rewardMessage, setRewardMessage] = useState('');
   const [selectedDate, setSelectedDate] = useState(todayKey());
   const [visibleMonth, setVisibleMonth] = useState(monthKey(new Date()));
   const [note, setNote] = useState(state.notes[todayKey()] || '');
@@ -167,7 +185,8 @@ function App() {
     const totalToday = state.habits.length || 1;
     const dailyPercent = Math.round((completedToday / totalToday) * 100);
     const activeDays = Object.values(state.logs).filter(isProtectedLog).length;
-    return { totalXp, completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
+    const spentXp = redemptionSpent(state.redemptions || []);
+    return { totalXp, spentXp, rewardBalance: Math.max(0, totalXp - spentXp), completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
   }, [state, today.completed.length]);
 
   const monthReport = useMemo(() => getMonthReport(state, visibleMonth), [state, visibleMonth]);
@@ -202,7 +221,7 @@ function App() {
 
   function resetDemo() {
     if (!confirm('Reset semua data lokal?')) return;
-    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT };
+    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     setState(fresh);
     setSelectedDate(todayKey());
@@ -241,6 +260,59 @@ function App() {
     const [year, month] = visibleMonth.split('-').map(Number);
     const next = new Date(year, month - 1 + offset, 1);
     setVisibleMonth(monthKey(next));
+  }
+
+  function addReward(e) {
+    e.preventDefault();
+    const name = rewardName.trim();
+    const cost = Number(rewardCost);
+    if (!name || !Number.isFinite(cost) || cost <= 0) {
+      setRewardMessage('Isi nama reward dan biaya XP yang valid dulu.');
+      return;
+    }
+    setState(prev => ({
+      ...prev,
+      rewards: [...(prev.rewards || []), { id: crypto.randomUUID(), name, cost: Math.round(cost) }],
+    }));
+    setRewardName('');
+    setRewardCost('');
+    setRewardMessage('Reward baru masuk shop. Tinggal dikejar XP-nya ✨');
+  }
+
+  function editReward(reward) {
+    const name = prompt('Nama reward', reward.name)?.trim();
+    if (!name) return;
+    const cost = Number(prompt('Biaya XP', reward.cost));
+    if (!Number.isFinite(cost) || cost <= 0) {
+      setRewardMessage('Biaya reward harus angka lebih dari 0.');
+      return;
+    }
+    setState(prev => ({
+      ...prev,
+      rewards: (prev.rewards || []).map(item => item.id === reward.id ? { ...item, name, cost: Math.round(cost) } : item),
+    }));
+    setRewardMessage('Reward berhasil diperbarui.');
+  }
+
+  function deleteReward(id) {
+    if (!confirm('Hapus reward ini dari shop? Riwayat redeem tetap disimpan.')) return;
+    setState(prev => ({ ...prev, rewards: (prev.rewards || []).filter(item => item.id !== id) }));
+    setRewardMessage('Reward dihapus dari shop.');
+  }
+
+  function redeemReward(reward) {
+    if (stats.rewardBalance < reward.cost) {
+      setRewardMessage(`XP belum cukup untuk ${reward.name}. Butuh ${reward.cost - stats.rewardBalance} XP lagi.`);
+      return;
+    }
+    setState(prev => ({
+      ...prev,
+      redemptions: [
+        { id: crypto.randomUUID(), rewardId: reward.id, name: reward.name, cost: reward.cost, redeemedAt: new Date().toISOString() },
+        ...(prev.redemptions || []),
+      ],
+    }));
+    setRewardMessage(`Redeemed: ${reward.name}. Nikmati hadiahnya, kamu pantas dapat ini.`);
   }
 
   const selectedLog = state.logs[selectedDate] || { completed: [] };
@@ -354,6 +426,35 @@ function App() {
             {monthReport.habitCounts.map(habit => <div key={habit.id}>
               <span><i style={{ background: habit.color }} />{habit.title}</span><strong>{habit.count}x</strong>
             </div>)}
+          </div>
+        </div>
+      </section>
+
+      <section className="panel reward-panel">
+        <div className="section-head">
+          <div><p className="eyebrow"><Gift size={16}/> Reward shop</p><h2>Tukar progress jadi self-reward</h2></div>
+          <div className="reward-balance"><Coins size={18}/><span>{stats.rewardBalance} XP tersedia</span><small>{stats.spentXp} XP sudah diredeem</small></div>
+        </div>
+        <form className="reward-form" onSubmit={addReward}>
+          <input value={rewardName} onChange={e => setRewardName(e.target.value)} placeholder="Nama reward, mis. boba favorit" />
+          <input value={rewardCost} onChange={e => setRewardCost(e.target.value)} placeholder="Biaya XP" type="number" min="1" />
+          <button><Plus size={18}/> Tambah reward</button>
+        </form>
+        {rewardMessage && <p className="reward-message">{rewardMessage}</p>}
+        <div className="reward-layout">
+          <div className="reward-list">
+            {(state.rewards || []).map(reward => <article className="reward-card" key={reward.id}>
+              <div><strong>{reward.name}</strong><span>{reward.cost} XP</span></div>
+              <button className="ghost" onClick={() => redeemReward(reward)} type="button">Redeem</button>
+              <button className="icon-btn" onClick={() => editReward(reward)} title="Edit reward" type="button"><Pencil size={16}/></button>
+              <button className="icon-btn danger" onClick={() => deleteReward(reward.id)} title="Hapus reward" type="button"><Trash2 size={16}/></button>
+            </article>)}
+          </div>
+          <div className="redemption-history">
+            <h3>Recent redemptions</h3>
+            {(state.redemptions || []).length ? (state.redemptions || []).slice(0, 5).map(item => <div key={item.id}>
+              <span>{item.name}</span><strong>-{item.cost} XP</strong><small>{new Date(item.redeemedAt).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}</small>
+            </div>) : <p>Belum ada reward yang diredeem. Kumpulkan XP dulu, lalu manjakan diri dengan elegan.</p>}
           </div>
         </div>
       </section>
