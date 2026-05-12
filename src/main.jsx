@@ -7,13 +7,17 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Coins,
   Flame,
+  Gift,
   ShieldCheck,
   LogOut,
+  Pencil,
   Plus,
   RotateCcw,
   Sparkles,
   Target,
+  Trash2,
   Trophy,
   UserCircle2,
   Zap,
@@ -27,6 +31,11 @@ const BACKUP_VERSION = 1;
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
+const defaultRewards = [
+  { id: crypto.randomUUID(), name: 'Kopi favorit', cost: 80 },
+  { id: crypto.randomUUID(), name: 'Episode bebas rasa bersalah', cost: 120 },
+  { id: crypto.randomUUID(), name: 'Self-date kecil', cost: 250 },
+];
 const todayKey = () => toDateKey(new Date());
 const defaultHabits = [
   { id: crypto.randomUUID(), title: 'Deep work / belajar', points: 25, color: '#7c3aed' },
@@ -58,9 +67,11 @@ function loadState() {
       logs: parsed.logs,
       notes: parsed.notes || {},
       freezeCount: Number.isFinite(parsed.freezeCount) ? parsed.freezeCount : DEFAULT_FREEZE_COUNT,
+      rewards: Array.isArray(parsed.rewards) ? parsed.rewards : defaultRewards,
+      redemptions: Array.isArray(parsed.redemptions) ? parsed.redemptions : [],
     };
   }
-  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT };
+  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
 }
 
 function loadProfile() {
@@ -88,9 +99,14 @@ function validateBackup(payload) {
   if (!isPlainObject(state.logs)) return 'Riwayat progress di file backup tidak valid.';
   if (state.notes !== undefined && !isPlainObject(state.notes)) return 'Catatan di file backup tidak valid.';
   if (state.freezeCount !== undefined && !Number.isFinite(state.freezeCount)) return 'Jumlah streak freeze di file backup tidak valid.';
+  if (state.rewards !== undefined && !Array.isArray(state.rewards)) return 'Daftar reward di file backup tidak valid.';
+  if (state.redemptions !== undefined && !Array.isArray(state.redemptions)) return 'Riwayat redeem di file backup tidak valid.';
 
   const invalidHabit = state.habits.some(habit => !isPlainObject(habit) || typeof habit.id !== 'string' || typeof habit.title !== 'string' || !Number.isFinite(habit.points));
   if (invalidHabit) return 'Ada habit di file backup yang tidak valid.';
+
+  const invalidReward = (state.rewards || []).some(reward => !isPlainObject(reward) || typeof reward.id !== 'string' || typeof reward.name !== 'string' || !Number.isFinite(reward.cost));
+  if (invalidReward) return 'Ada reward di file backup yang tidak valid.';
 
   const invalidLog = Object.entries(state.logs).some(([date, log]) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isPlainObject(log)) return true;
@@ -107,6 +123,8 @@ function normalizeBackupState(importedState) {
     logs: importedState.logs,
     notes: importedState.notes || {},
     freezeCount: Number.isFinite(importedState.freezeCount) ? importedState.freezeCount : DEFAULT_FREEZE_COUNT,
+    rewards: Array.isArray(importedState.rewards) ? importedState.rewards : defaultRewards,
+    redemptions: Array.isArray(importedState.redemptions) ? importedState.redemptions : [],
   };
 }
 
@@ -117,6 +135,10 @@ function habitXp(habits, id) {
 function logXp(log, habits) {
   const habitTotal = (log?.completed || []).reduce((sum, id) => sum + habitXp(habits, id), 0);
   return habitTotal + (log?.restDay ? REST_DAY_XP : 0);
+}
+
+function redemptionSpent(redemptions) {
+  return redemptions.reduce((sum, item) => sum + (Number(item.cost) || 0), 0);
 }
 
 function isProtectedLog(log) {
@@ -156,6 +178,111 @@ function getStreak(logs) {
   return streak;
 }
 
+function addDays(date, amount) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+}
+
+function startOfWeek(date) {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay());
+  return start;
+}
+
+function weekKeyFromDateKey(key) {
+  return toDateKey(startOfWeek(new Date(`${key}T00:00:00`)));
+}
+
+function describeTrend(current, previous, unit) {
+  if (current === 0 && previous === 0) return `Belum ada ${unit} di dua periode terakhir`;
+  if (previous === 0) return current > 0 ? `Naik dari 0 ke ${current} ${unit}` : `Belum ada ${unit} periode ini`;
+  const diff = current - previous;
+  if (diff === 0) return `Stabil di ${current} ${unit}`;
+  const direction = diff > 0 ? 'Naik' : 'Turun';
+  const percent = Math.round((Math.abs(diff) / previous) * 100);
+  return `${direction} ${Math.abs(diff)} ${unit} (${percent}%)`;
+}
+
+function getInsights(state) {
+  const protectedEntries = Object.entries(state.logs)
+    .filter(([, log]) => isProtectedLog(log))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const protectedSet = new Set(protectedEntries.map(([key]) => key));
+  const totalCompletedDays = protectedEntries.length;
+
+  let longestStreak = 0;
+  let run = 0;
+  if (protectedEntries.length) {
+    const first = new Date(`${protectedEntries[0][0]}T00:00:00`);
+    const last = new Date(`${protectedEntries.at(-1)[0]}T00:00:00`);
+    for (let cursor = first; cursor <= last; cursor = addDays(cursor, 1)) {
+      if (protectedSet.has(toDateKey(cursor))) {
+        run += 1;
+        longestStreak = Math.max(longestStreak, run);
+      } else {
+        run = 0;
+      }
+    }
+  }
+
+  const weekBuckets = new Map();
+  const monthBuckets = new Map();
+  protectedEntries.forEach(([key, log]) => {
+    const weekKey = weekKeyFromDateKey(key);
+    const week = weekBuckets.get(weekKey) || { key: weekKey, activeDays: 0, xp: 0 };
+    week.activeDays += 1;
+    week.xp += logXp(log, state.habits);
+    weekBuckets.set(weekKey, week);
+
+    const month = monthBuckets.get(key.slice(0, 7)) || { key: key.slice(0, 7), activeDays: 0, xp: 0 };
+    month.activeDays += 1;
+    month.xp += logXp(log, state.habits);
+    monthBuckets.set(month.key, month);
+  });
+
+  const bestWeek = [...weekBuckets.values()].sort((a, b) => b.activeDays - a.activeDays || b.xp - a.xp || a.key.localeCompare(b.key))[0] || null;
+  const bestMonth = [...monthBuckets.values()].sort((a, b) => b.activeDays - a.activeDays || b.xp - a.xp || a.key.localeCompare(b.key))[0] || null;
+
+  const today = new Date();
+  const currentWeekStart = startOfWeek(today);
+  const previousWeekStart = addDays(currentWeekStart, -7);
+  const countRange = (start, days) => Array.from({ length: days }, (_, index) => toDateKey(addDays(start, index)))
+    .filter(key => isProtectedLog(state.logs[key])).length;
+  const currentWeekDays = countRange(currentWeekStart, 7);
+  const previousWeekDays = countRange(previousWeekStart, 7);
+
+  const currentMonth = monthKey(today);
+  const previousMonth = monthKey(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+  const currentMonthDays = protectedEntries.filter(([key]) => key.startsWith(currentMonth)).length;
+  const previousMonthDays = protectedEntries.filter(([key]) => key.startsWith(previousMonth)).length;
+
+  const habitSignals = state.habits.map(habit => {
+    const count = protectedEntries.filter(([, log]) => log.completed?.includes(habit.id)).length;
+    return { ...habit, count, rate: totalCompletedDays ? Math.round((count / totalCompletedDays) * 100) : 0 };
+  });
+  const topHabit = habitSignals.length && totalCompletedDays
+    ? [...habitSignals].sort((a, b) => b.count - a.count || a.title.localeCompare(b.title))[0]
+    : null;
+  const attentionHabit = habitSignals.length && totalCompletedDays
+    ? [...habitSignals].sort((a, b) => a.count - b.count || a.title.localeCompare(b.title))[0]
+    : null;
+
+  return {
+    currentStreak: getStreak(state.logs),
+    longestStreak,
+    bestWeek,
+    bestMonth,
+    totalCompletedDays,
+    weekTrend: describeTrend(currentWeekDays, previousWeekDays, 'hari aktif/minggu'),
+    monthTrend: describeTrend(currentMonthDays, previousMonthDays, 'hari aktif/bulan'),
+    topHabit,
+    attentionHabit,
+    hasEnoughData: totalCompletedDays >= 3,
+  };
+}
+
 function getMonthDays(currentMonth) {
   const [year, month] = currentMonth.split('-').map(Number);
   const first = new Date(year, month - 1, 1);
@@ -188,6 +315,9 @@ function App() {
   const [profile, setProfile] = useState(loadProfile);
   const [state, setState] = useState(loadState);
   const [habitTitle, setHabitTitle] = useState('');
+  const [rewardName, setRewardName] = useState('');
+  const [rewardCost, setRewardCost] = useState('');
+  const [rewardMessage, setRewardMessage] = useState('');
   const [selectedDate, setSelectedDate] = useState(todayKey());
   const [visibleMonth, setVisibleMonth] = useState(monthKey(new Date()));
   const [note, setNote] = useState(state.notes[todayKey()] || '');
@@ -211,10 +341,12 @@ function App() {
     const totalToday = state.habits.length || 1;
     const dailyPercent = Math.round((completedToday / totalToday) * 100);
     const activeDays = Object.values(state.logs).filter(isProtectedLog).length;
-    return { totalXp, completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
+    const spentXp = redemptionSpent(state.redemptions || []);
+    return { totalXp, spentXp, rewardBalance: Math.max(0, totalXp - spentXp), completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
   }, [state, today.completed.length]);
 
   const monthReport = useMemo(() => getMonthReport(state, visibleMonth), [state, visibleMonth]);
+  const insights = useMemo(() => getInsights(state), [state]);
   const monthDays = useMemo(() => getMonthDays(visibleMonth), [visibleMonth]);
 
   const achievements = [
@@ -246,7 +378,7 @@ function App() {
 
   function resetDemo() {
     if (!confirm('Reset semua data lokal?')) return;
-    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT };
+    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     setState(fresh);
     setSelectedDate(todayKey());
@@ -337,6 +469,59 @@ function App() {
     const [year, month] = visibleMonth.split('-').map(Number);
     const next = new Date(year, month - 1 + offset, 1);
     setVisibleMonth(monthKey(next));
+  }
+
+  function addReward(e) {
+    e.preventDefault();
+    const name = rewardName.trim();
+    const cost = Number(rewardCost);
+    if (!name || !Number.isFinite(cost) || cost <= 0) {
+      setRewardMessage('Isi nama reward dan biaya XP yang valid dulu.');
+      return;
+    }
+    setState(prev => ({
+      ...prev,
+      rewards: [...(prev.rewards || []), { id: crypto.randomUUID(), name, cost: Math.round(cost) }],
+    }));
+    setRewardName('');
+    setRewardCost('');
+    setRewardMessage('Reward baru masuk shop. Tinggal dikejar XP-nya ✨');
+  }
+
+  function editReward(reward) {
+    const name = prompt('Nama reward', reward.name)?.trim();
+    if (!name) return;
+    const cost = Number(prompt('Biaya XP', reward.cost));
+    if (!Number.isFinite(cost) || cost <= 0) {
+      setRewardMessage('Biaya reward harus angka lebih dari 0.');
+      return;
+    }
+    setState(prev => ({
+      ...prev,
+      rewards: (prev.rewards || []).map(item => item.id === reward.id ? { ...item, name, cost: Math.round(cost) } : item),
+    }));
+    setRewardMessage('Reward berhasil diperbarui.');
+  }
+
+  function deleteReward(id) {
+    if (!confirm('Hapus reward ini dari shop? Riwayat redeem tetap disimpan.')) return;
+    setState(prev => ({ ...prev, rewards: (prev.rewards || []).filter(item => item.id !== id) }));
+    setRewardMessage('Reward dihapus dari shop.');
+  }
+
+  function redeemReward(reward) {
+    if (stats.rewardBalance < reward.cost) {
+      setRewardMessage(`XP belum cukup untuk ${reward.name}. Butuh ${reward.cost - stats.rewardBalance} XP lagi.`);
+      return;
+    }
+    setState(prev => ({
+      ...prev,
+      redemptions: [
+        { id: crypto.randomUUID(), rewardId: reward.id, name: reward.name, cost: reward.cost, redeemedAt: new Date().toISOString() },
+        ...(prev.redemptions || []),
+      ],
+    }));
+    setRewardMessage(`Redeemed: ${reward.name}. Nikmati hadiahnya, kamu pantas dapat ini.`);
   }
 
   const selectedLog = state.logs[selectedDate] || { completed: [] };
@@ -444,6 +629,26 @@ function App() {
         </section>
       </section>
 
+      <section className="panel insights-panel">
+        <div className="section-head compact">
+          <div><p className="eyebrow"><BarChart3 size={16}/> Insights</p><h2>Personal best & sinyal konsistensi</h2></div>
+          {!insights.hasEnoughData && <span className="empty-pill">Butuh 3 hari aktif untuk insight lebih tajam</span>}
+        </div>
+        <div className="insight-grid">
+          <Report label="Current streak" value={`${insights.currentStreak} hari`} />
+          <Report label="Longest streak" value={`${insights.longestStreak} hari`} />
+          <Report label="Best week" value={insights.bestWeek ? `${insights.bestWeek.activeDays} hari • ${insights.bestWeek.key}` : 'Belum ada'} />
+          <Report label="Best month" value={insights.bestMonth ? `${insights.bestMonth.activeDays} hari • ${insights.bestMonth.key}` : 'Belum ada'} />
+          <Report label="Total completed days" value={`${insights.totalCompletedDays} hari`} />
+        </div>
+        <div className="trend-grid">
+          <div className="signal-card"><span>Vs minggu lalu</span><strong>{insights.weekTrend}</strong></div>
+          <div className="signal-card"><span>Vs bulan lalu</span><strong>{insights.monthTrend}</strong></div>
+          <div className="signal-card positive"><span>Top habit</span><strong>{insights.topHabit ? `${insights.topHabit.title} • ${insights.topHabit.count}x` : 'Belum cukup data'}</strong></div>
+          <div className="signal-card warning"><span>Butuh perhatian</span><strong>{insights.attentionHabit ? `${insights.attentionHabit.title} • ${insights.attentionHabit.rate}%` : 'Belum cukup data'}</strong></div>
+        </div>
+      </section>
+
       <section className="grid lower-grid">
         <div className="panel">
           <p className="eyebrow">Refleksi</p>
@@ -464,6 +669,35 @@ function App() {
             {monthReport.habitCounts.map(habit => <div key={habit.id}>
               <span><i style={{ background: habit.color }} />{habit.title}</span><strong>{habit.count}x</strong>
             </div>)}
+          </div>
+        </div>
+      </section>
+
+      <section className="panel reward-panel">
+        <div className="section-head">
+          <div><p className="eyebrow"><Gift size={16}/> Reward shop</p><h2>Tukar progress jadi self-reward</h2></div>
+          <div className="reward-balance"><Coins size={18}/><span>{stats.rewardBalance} XP tersedia</span><small>{stats.spentXp} XP sudah diredeem</small></div>
+        </div>
+        <form className="reward-form" onSubmit={addReward}>
+          <input value={rewardName} onChange={e => setRewardName(e.target.value)} placeholder="Nama reward, mis. boba favorit" />
+          <input value={rewardCost} onChange={e => setRewardCost(e.target.value)} placeholder="Biaya XP" type="number" min="1" />
+          <button><Plus size={18}/> Tambah reward</button>
+        </form>
+        {rewardMessage && <p className="reward-message">{rewardMessage}</p>}
+        <div className="reward-layout">
+          <div className="reward-list">
+            {(state.rewards || []).map(reward => <article className="reward-card" key={reward.id}>
+              <div><strong>{reward.name}</strong><span>{reward.cost} XP</span></div>
+              <button className="ghost" onClick={() => redeemReward(reward)} type="button">Redeem</button>
+              <button className="icon-btn" onClick={() => editReward(reward)} title="Edit reward" type="button"><Pencil size={16}/></button>
+              <button className="icon-btn danger" onClick={() => deleteReward(reward.id)} title="Hapus reward" type="button"><Trash2 size={16}/></button>
+            </article>)}
+          </div>
+          <div className="redemption-history">
+            <h3>Recent redemptions</h3>
+            {(state.redemptions || []).length ? (state.redemptions || []).slice(0, 5).map(item => <div key={item.id}>
+              <span>{item.name}</span><strong>-{item.cost} XP</strong><small>{new Date(item.redeemedAt).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}</small>
+            </div>) : <p>Belum ada reward yang diredeem. Kumpulkan XP dulu, lalu manjakan diri dengan elegan.</p>}
           </div>
         </div>
       </section>
