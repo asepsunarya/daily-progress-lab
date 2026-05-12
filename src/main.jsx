@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Flame,
+  ShieldCheck,
   LogOut,
   Plus,
   RotateCcw,
@@ -23,6 +24,8 @@ const STORAGE_KEY = 'daily-progress-lab:v2';
 const LEGACY_STORAGE_KEY = 'daily-progress-lab:v1';
 const PROFILE_KEY = 'daily-progress-lab:profile';
 const dayMs = 24 * 60 * 60 * 1000;
+const DEFAULT_FREEZE_COUNT = 2;
+const REST_DAY_XP = 5;
 const todayKey = () => toDateKey(new Date());
 const defaultHabits = [
   { id: crypto.randomUUID(), title: 'Deep work / belajar', points: 25, color: '#7c3aed' },
@@ -49,9 +52,14 @@ function loadJson(key) {
 function loadState() {
   const parsed = loadJson(STORAGE_KEY) || loadJson(LEGACY_STORAGE_KEY);
   if (parsed?.habits && parsed?.logs) {
-    return { habits: parsed.habits, logs: parsed.logs, notes: parsed.notes || {} };
+    return {
+      habits: parsed.habits,
+      logs: parsed.logs,
+      notes: parsed.notes || {},
+      freezeCount: Number.isFinite(parsed.freezeCount) ? parsed.freezeCount : DEFAULT_FREEZE_COUNT,
+    };
   }
-  return { habits: defaultHabits, logs: {}, notes: {} };
+  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT };
 }
 
 function loadProfile() {
@@ -65,7 +73,16 @@ function habitXp(habits, id) {
 }
 
 function logXp(log, habits) {
-  return (log?.completed || []).reduce((sum, id) => sum + habitXp(habits, id), 0);
+  const habitTotal = (log?.completed || []).reduce((sum, id) => sum + habitXp(habits, id), 0);
+  return habitTotal + (log?.restDay ? REST_DAY_XP : 0);
+}
+
+function isProtectedLog(log) {
+  return Boolean(log?.completed?.length || log?.restDay || log?.frozen);
+}
+
+function isPastDate(key) {
+  return key < todayKey();
 }
 
 function logPercent(log, habits) {
@@ -90,7 +107,7 @@ function getStreak(logs) {
   const cursor = new Date();
   while (true) {
     const key = toDateKey(cursor);
-    if (!logs[key]?.completed?.length) break;
+    if (!isProtectedLog(logs[key])) break;
     streak += 1;
     cursor.setDate(cursor.getDate() - 1);
   }
@@ -111,8 +128,10 @@ function getMonthDays(currentMonth) {
 
 function getMonthReport(state, currentMonth) {
   const entries = Object.entries(state.logs).filter(([key]) => key.startsWith(currentMonth));
-  const activeDays = entries.filter(([, log]) => log.completed?.length).length;
-  const perfectDays = entries.filter(([, log]) => logPercent(log, state.habits) === 100).length;
+  const activeDays = entries.filter(([, log]) => isProtectedLog(log)).length;
+  const restDays = entries.filter(([, log]) => log.restDay).length;
+  const frozenDays = entries.filter(([, log]) => log.frozen).length;
+  const perfectDays = entries.filter(([, log]) => !log.restDay && !log.frozen && logPercent(log, state.habits) === 100).length;
   const totalXp = entries.reduce((sum, [, log]) => sum + logXp(log, state.habits), 0);
   const possibleDays = new Date(Number(currentMonth.slice(0, 4)), Number(currentMonth.slice(5)), 0).getDate();
   const consistency = Math.round((activeDays / possibleDays) * 100);
@@ -120,7 +139,7 @@ function getMonthReport(state, currentMonth) {
     ...habit,
     count: entries.filter(([, log]) => log.completed?.includes(habit.id)).length,
   })).sort((a, b) => b.count - a.count);
-  return { activeDays, perfectDays, totalXp, consistency, habitCounts };
+  return { activeDays, restDays, frozenDays, perfectDays, totalXp, consistency, habitCounts };
 }
 
 function App() {
@@ -147,7 +166,7 @@ function App() {
     const completedToday = today.completed.length;
     const totalToday = state.habits.length || 1;
     const dailyPercent = Math.round((completedToday / totalToday) * 100);
-    const activeDays = Object.values(state.logs).filter(log => log.completed?.length).length;
+    const activeDays = Object.values(state.logs).filter(isProtectedLog).length;
     return { totalXp, completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
   }, [state, today.completed.length]);
 
@@ -165,7 +184,7 @@ function App() {
     setState(prev => {
       const log = prev.logs[selectedDate] || { completed: [] };
       const completed = log.completed.includes(id) ? log.completed.filter(item => item !== id) : [...log.completed, id];
-      return { ...prev, logs: { ...prev.logs, [selectedDate]: { ...log, completed } } };
+      return { ...prev, logs: { ...prev.logs, [selectedDate]: { ...log, completed, restDay: false, frozen: false } } };
     });
   }
 
@@ -183,7 +202,7 @@ function App() {
 
   function resetDemo() {
     if (!confirm('Reset semua data lokal?')) return;
-    const fresh = { habits: defaultHabits, logs: {}, notes: {} };
+    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     setState(fresh);
     setSelectedDate(todayKey());
@@ -191,11 +210,41 @@ function App() {
     setNote('');
   }
 
+
+  function toggleRestDay() {
+    setState(prev => {
+      const log = prev.logs[selectedDate] || { completed: [] };
+      const restDay = !log.restDay;
+      return {
+        ...prev,
+        logs: {
+          ...prev.logs,
+          [selectedDate]: { ...log, completed: restDay ? [] : log.completed, restDay, frozen: restDay ? false : log.frozen },
+        },
+      };
+    });
+  }
+
+  function useFreeze() {
+    setState(prev => {
+      const log = prev.logs[selectedDate] || { completed: [] };
+      if (prev.freezeCount <= 0 || !isPastDate(selectedDate) || isProtectedLog(log)) return prev;
+      return {
+        ...prev,
+        freezeCount: prev.freezeCount - 1,
+        logs: { ...prev.logs, [selectedDate]: { ...log, completed: [], frozen: true, restDay: false } },
+      };
+    });
+  }
+
   function changeMonth(offset) {
     const [year, month] = visibleMonth.split('-').map(Number);
     const next = new Date(year, month - 1 + offset, 1);
     setVisibleMonth(monthKey(next));
   }
+
+  const selectedLog = state.logs[selectedDate] || { completed: [] };
+  const canUseFreeze = state.freezeCount > 0 && isPastDate(selectedDate) && !isProtectedLog(selectedLog);
 
   if (!profile) return <LoginScreen onLogin={setProfile} />;
 
@@ -227,9 +276,10 @@ function App() {
         <span>cloud login Google</span><span>multi project tracker</span><span>export PDF bulanan</span><span>reminder WhatsApp</span><span>leaderboard privat</span>
       </section>
 
-      <section className="grid stats-grid">
+      <section className="grid stats-grid five">
         <Stat icon={Target} label="Progress tanggal terpilih" value={`${stats.dailyPercent}%`} />
         <Stat icon={Flame} label="Streak" value={`${stats.streak} hari`} />
+        <Stat icon={ShieldCheck} label="Streak Freeze" value={`${state.freezeCount} tersedia`} />
         <Stat icon={Sparkles} label="Total XP" value={stats.totalXp} />
         <Stat icon={CalendarDays} label="Hari aktif" value={stats.activeDays} />
       </section>
@@ -241,6 +291,11 @@ function App() {
             <button className="ghost" onClick={resetDemo}><RotateCcw size={16}/> Reset</button>
           </div>
           <div className="daily-progress"><span style={{ width: `${stats.dailyPercent}%` }} /></div>
+          <div className="protection-row">
+            <button className={`ghost protection ${selectedLog.restDay ? 'active rest' : ''}`} onClick={toggleRestDay} type="button">Rest day +{REST_DAY_XP} XP</button>
+            <button className={`ghost protection ${selectedLog.frozen ? 'active freeze' : ''}`} onClick={useFreeze} disabled={!canUseFreeze} type="button">Pakai freeze untuk missed day</button>
+          </div>
+          <p className="log-status">{selectedLog.frozen ? '🛡️ Tanggal ini dilindungi Streak Freeze.' : selectedLog.restDay ? '🌙 Tanggal ini ditandai Rest Day: sengaja istirahat, XP kecil saja.' : canUseFreeze ? 'Missed day terdeteksi. Pakai freeze untuk menjaga streak.' : 'Checklist habit atau tandai rest day kalau memang sengaja istirahat.'}</p>
           <div className="habit-list">
             {state.habits.map(habit => {
               const done = today.completed.includes(habit.id);
@@ -269,8 +324,10 @@ function App() {
               if (!day) return <span className="calendar-cell empty" key={`empty-${index}`} />;
               const key = toDateKey(day);
               const percent = logPercent(state.logs[key], state.habits);
-              return <button key={key} className={`calendar-cell ${key === selectedDate ? 'selected' : ''}`} onClick={() => setSelectedDate(key)}>
-                <span>{day.getDate()}</span><i style={{ opacity: Math.max(.08, percent / 100), background: percent === 100 ? '#22c55e' : '#8b5cf6' }} />
+              const log = state.logs[key];
+              const stateClass = log?.frozen ? 'frozen' : log?.restDay ? 'rest' : percent > 0 ? 'done' : '';
+              return <button key={key} className={`calendar-cell ${stateClass} ${key === selectedDate ? 'selected' : ''}`} onClick={() => setSelectedDate(key)}>
+                <span>{day.getDate()}</span><small>{log?.frozen ? 'Freeze' : log?.restDay ? 'Rest' : percent ? `${percent}%` : '—'}</small><i style={{ opacity: Math.max(.08, percent / 100), background: log?.frozen ? '#38bdf8' : log?.restDay ? '#f59e0b' : percent === 100 ? '#22c55e' : '#8b5cf6' }} />
               </button>;
             })}
           </div>
@@ -290,6 +347,7 @@ function App() {
             <Report label="XP bulan ini" value={monthReport.totalXp} />
             <Report label="Hari aktif" value={monthReport.activeDays} />
             <Report label="Perfect days" value={monthReport.perfectDays} />
+            <Report label="Rest / Freeze" value={`${monthReport.restDays}/${monthReport.frozenDays}`} />
             <Report label="Konsistensi" value={`${monthReport.consistency}%`} />
           </div>
           <div className="habit-ranking">
