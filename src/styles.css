@@ -87,3 +87,14 @@ textarea { min-height: 188px; resize: vertical; margin-top: 16px; line-height: 1
 .calendar-cell.frozen { background: rgba(14,165,233,.12); border-color: rgba(56,189,248,.48); }
 .calendar-cell.done { background: rgba(124,58,237,.12); }
 @media (max-width: 980px) { .stats-grid.five { grid-template-columns: 1fr; } }
+.insights-panel { padding: 24px; margin-bottom: 16px; }
+.insight-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 16px; }
+.trend-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+.signal-card { min-height: 104px; display: grid; align-content: space-between; gap: 12px; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.06); border-radius: 18px; padding: 14px; }
+.signal-card span, .empty-pill { color: #94a3b8; font-size: .85rem; }
+.signal-card strong { color: #e2e8f0; line-height: 1.35; }
+.signal-card.positive { background: rgba(34,197,94,.12); border-color: rgba(34,197,94,.34); }
+.signal-card.warning { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.34); }
+.empty-pill { border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.06); border-radius: 999px; padding: 8px 10px; }
+@media (max-width: 980px) { .insight-grid, .trend-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .insight-grid, .trend-grid { grid-template-columns: 1fr; } }

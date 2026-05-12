@@ -114,6 +114,111 @@ function getStreak(logs) {
   return streak;
 }
 
+function addDays(date, amount) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+}
+
+function startOfWeek(date) {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay());
+  return start;
+}
+
+function weekKeyFromDateKey(key) {
+  return toDateKey(startOfWeek(new Date(`${key}T00:00:00`)));
+}
+
+function describeTrend(current, previous, unit) {
+  if (current === 0 && previous === 0) return `Belum ada ${unit} di dua periode terakhir`;
+  if (previous === 0) return current > 0 ? `Naik dari 0 ke ${current} ${unit}` : `Belum ada ${unit} periode ini`;
+  const diff = current - previous;
+  if (diff === 0) return `Stabil di ${current} ${unit}`;
+  const direction = diff > 0 ? 'Naik' : 'Turun';
+  const percent = Math.round((Math.abs(diff) / previous) * 100);
+  return `${direction} ${Math.abs(diff)} ${unit} (${percent}%)`;
+}
+
+function getInsights(state) {
+  const protectedEntries = Object.entries(state.logs)
+    .filter(([, log]) => isProtectedLog(log))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const protectedSet = new Set(protectedEntries.map(([key]) => key));
+  const totalCompletedDays = protectedEntries.length;
+
+  let longestStreak = 0;
+  let run = 0;
+  if (protectedEntries.length) {
+    const first = new Date(`${protectedEntries[0][0]}T00:00:00`);
+    const last = new Date(`${protectedEntries.at(-1)[0]}T00:00:00`);
+    for (let cursor = first; cursor <= last; cursor = addDays(cursor, 1)) {
+      if (protectedSet.has(toDateKey(cursor))) {
+        run += 1;
+        longestStreak = Math.max(longestStreak, run);
+      } else {
+        run = 0;
+      }
+    }
+  }
+
+  const weekBuckets = new Map();
+  const monthBuckets = new Map();
+  protectedEntries.forEach(([key, log]) => {
+    const weekKey = weekKeyFromDateKey(key);
+    const week = weekBuckets.get(weekKey) || { key: weekKey, activeDays: 0, xp: 0 };
+    week.activeDays += 1;
+    week.xp += logXp(log, state.habits);
+    weekBuckets.set(weekKey, week);
+
+    const month = monthBuckets.get(key.slice(0, 7)) || { key: key.slice(0, 7), activeDays: 0, xp: 0 };
+    month.activeDays += 1;
+    month.xp += logXp(log, state.habits);
+    monthBuckets.set(month.key, month);
+  });
+
+  const bestWeek = [...weekBuckets.values()].sort((a, b) => b.activeDays - a.activeDays || b.xp - a.xp || a.key.localeCompare(b.key))[0] || null;
+  const bestMonth = [...monthBuckets.values()].sort((a, b) => b.activeDays - a.activeDays || b.xp - a.xp || a.key.localeCompare(b.key))[0] || null;
+
+  const today = new Date();
+  const currentWeekStart = startOfWeek(today);
+  const previousWeekStart = addDays(currentWeekStart, -7);
+  const countRange = (start, days) => Array.from({ length: days }, (_, index) => toDateKey(addDays(start, index)))
+    .filter(key => isProtectedLog(state.logs[key])).length;
+  const currentWeekDays = countRange(currentWeekStart, 7);
+  const previousWeekDays = countRange(previousWeekStart, 7);
+
+  const currentMonth = monthKey(today);
+  const previousMonth = monthKey(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+  const currentMonthDays = protectedEntries.filter(([key]) => key.startsWith(currentMonth)).length;
+  const previousMonthDays = protectedEntries.filter(([key]) => key.startsWith(previousMonth)).length;
+
+  const habitSignals = state.habits.map(habit => {
+    const count = protectedEntries.filter(([, log]) => log.completed?.includes(habit.id)).length;
+    return { ...habit, count, rate: totalCompletedDays ? Math.round((count / totalCompletedDays) * 100) : 0 };
+  });
+  const topHabit = habitSignals.length && totalCompletedDays
+    ? [...habitSignals].sort((a, b) => b.count - a.count || a.title.localeCompare(b.title))[0]
+    : null;
+  const attentionHabit = habitSignals.length && totalCompletedDays
+    ? [...habitSignals].sort((a, b) => a.count - b.count || a.title.localeCompare(b.title))[0]
+    : null;
+
+  return {
+    currentStreak: getStreak(state.logs),
+    longestStreak,
+    bestWeek,
+    bestMonth,
+    totalCompletedDays,
+    weekTrend: describeTrend(currentWeekDays, previousWeekDays, 'hari aktif/minggu'),
+    monthTrend: describeTrend(currentMonthDays, previousMonthDays, 'hari aktif/bulan'),
+    topHabit,
+    attentionHabit,
+    hasEnoughData: totalCompletedDays >= 3,
+  };
+}
+
 function getMonthDays(currentMonth) {
   const [year, month] = currentMonth.split('-').map(Number);
   const first = new Date(year, month - 1, 1);
@@ -171,6 +276,7 @@ function App() {
   }, [state, today.completed.length]);
 
   const monthReport = useMemo(() => getMonthReport(state, visibleMonth), [state, visibleMonth]);
+  const insights = useMemo(() => getInsights(state), [state]);
   const monthDays = useMemo(() => getMonthDays(visibleMonth), [visibleMonth]);
 
   const achievements = [
@@ -332,6 +438,26 @@ function App() {
             })}
           </div>
         </section>
+      </section>
+
+      <section className="panel insights-panel">
+        <div className="section-head compact">
+          <div><p className="eyebrow"><BarChart3 size={16}/> Insights</p><h2>Personal best & sinyal konsistensi</h2></div>
+          {!insights.hasEnoughData && <span className="empty-pill">Butuh 3 hari aktif untuk insight lebih tajam</span>}
+        </div>
+        <div className="insight-grid">
+          <Report label="Current streak" value={`${insights.currentStreak} hari`} />
+          <Report label="Longest streak" value={`${insights.longestStreak} hari`} />
+          <Report label="Best week" value={insights.bestWeek ? `${insights.bestWeek.activeDays} hari • ${insights.bestWeek.key}` : 'Belum ada'} />
+          <Report label="Best month" value={insights.bestMonth ? `${insights.bestMonth.activeDays} hari • ${insights.bestMonth.key}` : 'Belum ada'} />
+          <Report label="Total completed days" value={`${insights.totalCompletedDays} hari`} />
+        </div>
+        <div className="trend-grid">
+          <div className="signal-card"><span>Vs minggu lalu</span><strong>{insights.weekTrend}</strong></div>
+          <div className="signal-card"><span>Vs bulan lalu</span><strong>{insights.monthTrend}</strong></div>
+          <div className="signal-card positive"><span>Top habit</span><strong>{insights.topHabit ? `${insights.topHabit.title} • ${insights.topHabit.count}x` : 'Belum cukup data'}</strong></div>
+          <div className="signal-card warning"><span>Butuh perhatian</span><strong>{insights.attentionHabit ? `${insights.attentionHabit.title} • ${insights.attentionHabit.rate}%` : 'Belum cukup data'}</strong></div>
+        </div>
       </section>
 
       <section className="grid lower-grid">
