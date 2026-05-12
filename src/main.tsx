@@ -30,6 +30,7 @@ const LEGACY_STORAGE_KEY = 'daily-progress-lab:v1';
 const PROFILE_KEY = 'daily-progress-lab:profile';
 const API_SYNC_PROFILE_KEY = 'daily-progress-lab:sync-profile-id';
 const BACKUP_VERSION = 1;
+const XP_AWARD_VERSION = 1;
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
@@ -64,7 +65,7 @@ function loadJson(key) {
 function loadState() {
   const parsed = loadJson(STORAGE_KEY) || loadJson(LEGACY_STORAGE_KEY);
   if (parsed?.habits && parsed?.logs) {
-    return {
+    const base = {
       habits: parsed.habits,
       logs: parsed.logs,
       notes: parsed.notes || {},
@@ -72,8 +73,9 @@ function loadState() {
       rewards: Array.isArray(parsed.rewards) ? parsed.rewards : defaultRewards,
       redemptions: Array.isArray(parsed.redemptions) ? parsed.redemptions : [],
     };
+    return { ...base, xp: normalizeXpState(parsed.xp, base.logs, base.habits) };
   }
-  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
+  return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [], xp: emptyXpState() };
 }
 
 
@@ -88,14 +90,19 @@ function getSyncProfileId(profile) {
 
 function mergeRemoteState(localState, remoteState) {
   if (!remoteState?.habits?.length && !Object.keys(remoteState?.logs || {}).length) return localState;
+  const mergedLogs = { ...localState.logs, ...(remoteState.logs || {}) };
+  const mergedHabits = remoteState.habits?.length ? remoteState.habits : localState.habits;
+  const localXp = normalizeXpState(localState.xp, localState.logs, localState.habits);
+  const remoteXp = normalizeXpState(remoteState.xp, remoteState.logs || {}, mergedHabits);
   return {
     ...localState,
     ...remoteState,
-    habits: remoteState.habits?.length ? remoteState.habits : localState.habits,
-    logs: { ...localState.logs, ...(remoteState.logs || {}) },
+    habits: mergedHabits,
+    logs: mergedLogs,
     notes: { ...localState.notes, ...(remoteState.notes || {}) },
     rewards: remoteState.rewards?.length ? remoteState.rewards : localState.rewards,
     redemptions: remoteState.redemptions?.length ? remoteState.redemptions : localState.redemptions,
+    xp: localXp.total >= remoteXp.total ? localXp : remoteXp,
   };
 }
 
@@ -142,6 +149,7 @@ function validateBackup(payload) {
   if (state.freezeCount !== undefined && !Number.isFinite(state.freezeCount)) return 'Jumlah streak freeze di file backup tidak valid.';
   if (state.rewards !== undefined && !Array.isArray(state.rewards)) return 'Daftar reward di file backup tidak valid.';
   if (state.redemptions !== undefined && !Array.isArray(state.redemptions)) return 'Riwayat redeem di file backup tidak valid.';
+  if (state.xp !== undefined && (!isPlainObject(state.xp) || !Number.isFinite(state.xp.total) || !Array.isArray(state.xp.awardedKeys))) return 'Data XP di file backup tidak valid.';
 
   const invalidHabit = state.habits.some(habit => !isPlainObject(habit) || typeof habit.id !== 'string' || typeof habit.title !== 'string' || !Number.isFinite(habit.points));
   if (invalidHabit) return 'Ada habit di file backup yang tidak valid.';
@@ -166,7 +174,49 @@ function normalizeBackupState(importedState) {
     freezeCount: Number.isFinite(importedState.freezeCount) ? importedState.freezeCount : DEFAULT_FREEZE_COUNT,
     rewards: Array.isArray(importedState.rewards) ? importedState.rewards : defaultRewards,
     redemptions: Array.isArray(importedState.redemptions) ? importedState.redemptions : [],
+    xp: normalizeXpState(importedState.xp, importedState.logs, importedState.habits),
   };
+}
+
+function emptyXpState() {
+  return { version: XP_AWARD_VERSION, total: 0, awardedKeys: [] };
+}
+
+function xpAwardKey(dateKey, kind, id = 'daily') {
+  return `${dateKey}:${kind}:${id}`;
+}
+
+function deriveXpStateFromLogs(logs, habits) {
+  const awardedKeys = [];
+  let total = 0;
+  Object.entries(logs || {}).forEach(([dateKey, log]) => {
+    (log?.completed || []).forEach(id => {
+      awardedKeys.push(xpAwardKey(dateKey, 'habit', id));
+      total += habitXp(habits, id);
+    });
+    if (log?.restDay) {
+      awardedKeys.push(xpAwardKey(dateKey, 'rest'));
+      total += REST_DAY_XP;
+    }
+  });
+  return { version: XP_AWARD_VERSION, total, awardedKeys };
+}
+
+function normalizeXpState(xp, logs = {}, habits = []) {
+  if (xp && Number.isFinite(xp.total) && Array.isArray(xp.awardedKeys)) {
+    return {
+      version: XP_AWARD_VERSION,
+      total: Math.max(0, Math.round(xp.total)),
+      awardedKeys: [...new Set(xp.awardedKeys.filter(key => typeof key === 'string'))],
+    };
+  }
+  return deriveXpStateFromLogs(logs, habits);
+}
+
+function awardXpOnce(prev, awardKey, amount) {
+  const xp = normalizeXpState(prev.xp, prev.logs, prev.habits);
+  if (xp.awardedKeys.includes(awardKey) || amount <= 0) return xp;
+  return { ...xp, total: xp.total + amount, awardedKeys: [...xp.awardedKeys, awardKey] };
 }
 
 function habitXp(habits, id) {
@@ -196,6 +246,9 @@ function logPercent(log, habits) {
 }
 
 function getLevel(totalXp) {
+  // Level formula: level 1 starts at 0 XP, level 2 needs 100 XP,
+  // then each next level costs ~18% more plus a flat 35 XP so early levels
+  // feel reachable while higher levels still take sustained progress.
   let level = 1;
   let required = 100;
   let remaining = totalXp;
@@ -414,7 +467,7 @@ function App() {
   }, [note, selectedDate]);
 
   const stats = useMemo(() => {
-    const totalXp = Object.values(state.logs).reduce((sum, log) => sum + logXp(log, state.habits), 0);
+    const totalXp = normalizeXpState(state.xp, state.logs, state.habits).total;
     const completedToday = today.completed.length;
     const totalToday = state.habits.length || 1;
     const dailyPercent = Math.round((completedToday / totalToday) * 100);
@@ -437,8 +490,14 @@ function App() {
   function toggleHabit(id) {
     setState(prev => {
       const log = prev.logs[selectedDate] || { completed: [] };
-      const completed = log.completed.includes(id) ? log.completed.filter(item => item !== id) : [...log.completed, id];
-      return { ...prev, logs: { ...prev.logs, [selectedDate]: { ...log, completed, restDay: false, frozen: false } } };
+      const wasDone = log.completed.includes(id);
+      const completed = wasDone ? log.completed.filter(item => item !== id) : [...log.completed, id];
+      const awardKey = xpAwardKey(selectedDate, 'habit', id);
+      return {
+        ...prev,
+        xp: wasDone ? normalizeXpState(prev.xp, prev.logs, prev.habits) : awardXpOnce(prev, awardKey, habitXp(prev.habits, id)),
+        logs: { ...prev.logs, [selectedDate]: { ...log, completed, restDay: false, frozen: false } },
+      };
     });
   }
 
@@ -456,7 +515,7 @@ function App() {
 
   function resetDemo() {
     if (!confirm('Reset semua data lokal?')) return;
-    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
+    const fresh = { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [], xp: emptyXpState() };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     setState(fresh);
     setSelectedDate(todayKey());
@@ -523,6 +582,7 @@ function App() {
       const restDay = !log.restDay;
       return {
         ...prev,
+        xp: restDay ? awardXpOnce(prev, xpAwardKey(selectedDate, 'rest'), REST_DAY_XP) : normalizeXpState(prev.xp, prev.logs, prev.habits),
         logs: {
           ...prev.logs,
           [selectedDate]: { ...log, completed: restDay ? [] : log.completed, restDay, frozen: restDay ? false : log.frozen },
