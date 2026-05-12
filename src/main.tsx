@@ -127,7 +127,7 @@ function isPlainObject(value) {
 
 function validateBackup(payload) {
   if (!isPlainObject(payload)) return 'File backup harus berupa JSON object.';
-  if (payload.app !== 'daily-progress-lab') return 'File ini bukan backup Daily Progress Lab.';
+  if (payload.app !== 'daily-progress-lab') return 'File ini bukan backup Daily XP.';
   if (payload.version !== BACKUP_VERSION) return `Versi backup tidak didukung: ${payload.version ?? 'kosong'}.`;
   if (!isPlainObject(payload.data)) return 'Data backup tidak lengkap.';
 
@@ -476,7 +476,7 @@ function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `daily-progress-lab-backup-v${BACKUP_VERSION}-${todayKey()}.json`;
+    link.download = `daily-xp-backup-v${BACKUP_VERSION}-${todayKey()}.json`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -611,9 +611,9 @@ function App() {
     <main className="shell">
       <section className="hero">
         <div>
-          <p className="eyebrow"><Zap size={16}/> Life progress tracker</p>
-          <h1>Ubah progress harianmu jadi game kecil yang bikin nagih.</h1>
-          <p className="subtitle">Catat habit, kumpulkan XP, naik level, jaga streak, dan lihat hidupmu bergerak maju setiap hari.</p>
+          <p className="eyebrow"><Zap size={16}/> Daily XP</p>
+          <h1>Level up progress harianmu, satu quest kecil tiap hari.</h1>
+          <p className="subtitle">Catat habit, kumpulkan XP, naik level, jaga streak, dan ubah rutinitasmu jadi RPG ringan untuk hidup nyata.</p>
         </div>
         <div className="level-card">
           <div className="profile-row">
@@ -631,8 +631,8 @@ function App() {
       </section>
 
       <section className="idea-strip panel">
-        <strong>Ide roadmap berikutnya:</strong>
-        <span>cloud login Google</span><span>multi project tracker</span><span>export PDF bulanan</span><span>reminder WhatsApp</span><span>leaderboard privat</span>
+        <strong>Daily XP roadmap:</strong>
+        <span>quest harian</span><span>party goals</span><span>boss battle mingguan</span><span>reminder streak</span><span>leaderboard privat</span>
       </section>
 
       <section className="backup-panel panel">
@@ -681,7 +681,7 @@ function App() {
             })}
           </div>
           <form className="add-form" onSubmit={addHabit}>
-            <input value={habitTitle} onChange={e => setHabitTitle(e.target.value)} placeholder="Tambah progress/habit baru..." />
+            <input value={habitTitle} onChange={e => setHabitTitle(e.target.value)} placeholder="Tambah quest/habit baru..." />
             <button><Plus size={18}/> Tambah</button>
           </form>
         </section>
@@ -731,7 +731,7 @@ function App() {
         <div className="panel">
           <p className="eyebrow">Refleksi</p>
           <h2>Catatan kemenangan kecil</h2>
-          <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Apa progress kecil yang kamu banggakan di tanggal ini?" />
+          <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Quest kecil apa yang kamu menangkan hari ini?" />
         </div>
         <div className="panel">
           <p className="eyebrow"><BarChart3 size={16}/> Laporan bulanan</p>
@@ -805,9 +805,9 @@ function LoginScreen({ onLogin }) {
   }
   return <main className="login-shell">
     <section className="login-card panel">
-      <p className="eyebrow"><Sparkles size={16}/> Daily Progress Lab</p>
-      <h1>Masuk dulu, lalu jadikan harimu punya progress bar.</h1>
-      <p className="subtitle">Login ini masih lokal di browser—cukup untuk personal tracking tanpa database.</p>
+      <p className="eyebrow"><Sparkles size={16}/> Daily XP</p>
+      <h1>Masuk dulu, lalu mulai naik level hari ini.</h1>
+      <p className="subtitle">Daily XP menyimpan progress lokal di browser—cukup ringan untuk tracking XP, streak, dan level pribadimu.</p>
       <form onSubmit={submit} className="login-form">
         <input value={name} onChange={e => setName(e.target.value)} placeholder="Nama panggilan" autoFocus />
         <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" type="email" />
