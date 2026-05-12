@@ -33,6 +33,8 @@ const BACKUP_VERSION = 1;
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
+const QUEST_COMPLETION_KEY = 'daily-progress-lab:quest-completions:v1';
+const QUEST_BONUS_BY_TIER = { daily: 15, weekly: 80 };
 const defaultRewards = [
   { id: crypto.randomUUID(), name: 'Kopi favorit', cost: 80 },
   { id: crypto.randomUUID(), name: 'Episode bebas rasa bersalah', cost: 120 },
@@ -74,6 +76,12 @@ function loadState() {
     };
   }
   return { habits: defaultHabits, logs: {}, notes: {}, freezeCount: DEFAULT_FREEZE_COUNT, rewards: defaultRewards, redemptions: [] };
+}
+
+function loadQuestCompletions() {
+  const parsed = loadJson(QUEST_COMPLETION_KEY);
+  if (parsed?.daily && parsed?.weekly) return parsed;
+  return { daily: {}, weekly: {} };
 }
 
 
@@ -236,6 +244,85 @@ function weekKeyFromDateKey(key) {
   return toDateKey(startOfWeek(new Date(`${key}T00:00:00`)));
 }
 
+function completionCountForRange(logs, habits, start, days, predicate = isProtectedLog) {
+  return Array.from({ length: days }, (_, index) => toDateKey(addDays(start, index)))
+    .filter(key => predicate(logs[key], habits)).length;
+}
+
+function questBonusXp(completions) {
+  const countClaimed = periods => Object.values(periods || {})
+    .reduce((sum, period) => sum + Object.values(period || {}).filter(Boolean).length, 0);
+  const daily = countClaimed(completions?.daily) * QUEST_BONUS_BY_TIER.daily;
+  const weekly = countClaimed(completions?.weekly) * QUEST_BONUS_BY_TIER.weekly;
+  return daily + weekly;
+}
+
+function getQuests(state, selectedDate) {
+  const selectedLog = state.logs[selectedDate] || { completed: [] };
+  const selectedWeekStart = startOfWeek(new Date(`${selectedDate}T00:00:00`));
+  const completedSelectedDay = selectedLog.completed?.length || 0;
+  const totalHabits = state.habits.length || 1;
+  const completedWeekDays = completionCountForRange(state.logs, state.habits, selectedWeekStart, 7);
+  const perfectWeekDays = completionCountForRange(state.logs, state.habits, selectedWeekStart, 7, (log, habits) => !log?.restDay && !log?.frozen && logPercent(log, habits) === 100);
+  const weeklyHabitChecks = Array.from({ length: 7 }, (_, index) => toDateKey(addDays(selectedWeekStart, index)))
+    .reduce((sum, key) => sum + (state.logs[key]?.completed?.length || 0), 0);
+
+  return {
+    daily: [
+      {
+        id: 'daily-first-step',
+        title: 'First step',
+        description: 'Selesaikan minimal 1 habit di tanggal terpilih.',
+        progress: Math.min(completedSelectedDay, 1),
+        target: 1,
+        done: completedSelectedDay >= 1,
+      },
+      {
+        id: 'daily-half-clear',
+        title: 'Half clear',
+        description: 'Tuntaskan separuh habit harianmu.',
+        progress: Math.min(completedSelectedDay, Math.ceil(totalHabits / 2)),
+        target: Math.ceil(totalHabits / 2),
+        done: completedSelectedDay >= Math.ceil(totalHabits / 2),
+      },
+      {
+        id: 'daily-perfect-or-rest',
+        title: 'Clean finish',
+        description: 'Capai 100% checklist atau tandai rest day sadar.',
+        progress: selectedLog.restDay ? 1 : completedSelectedDay,
+        target: selectedLog.restDay ? 1 : totalHabits,
+        done: selectedLog.restDay || completedSelectedDay >= totalHabits,
+      },
+    ],
+    weekly: [
+      {
+        id: 'weekly-three-active-days',
+        title: '3 active days',
+        description: 'Jaga ritme dengan 3 hari aktif minggu ini.',
+        progress: Math.min(completedWeekDays, 3),
+        target: 3,
+        done: completedWeekDays >= 3,
+      },
+      {
+        id: 'weekly-ten-checks',
+        title: '10 habit clears',
+        description: 'Kumpulkan 10 centang habit sepanjang minggu.',
+        progress: Math.min(weeklyHabitChecks, 10),
+        target: 10,
+        done: weeklyHabitChecks >= 10,
+      },
+      {
+        id: 'weekly-perfect-pair',
+        title: 'Perfect pair',
+        description: 'Buat 2 perfect day dalam satu minggu.',
+        progress: Math.min(perfectWeekDays, 2),
+        target: 2,
+        done: perfectWeekDays >= 2,
+      },
+    ],
+  };
+}
+
 function describeTrend(current, previous, unit) {
   if (current === 0 && previous === 0) return `Belum ada ${unit} di dua periode terakhir`;
   if (previous === 0) return current > 0 ? `Naik dari 0 ke ${current} ${unit}` : `Belum ada ${unit} periode ini`;
@@ -365,10 +452,12 @@ function App() {
   const [visibleMonth, setVisibleMonth] = useState(monthKey(new Date()));
   const [note, setNote] = useState(state.notes[todayKey()] || '');
   const [backupStatus, setBackupStatus] = useState('');
+  const [questCompletions, setQuestCompletions] = useState(loadQuestCompletions);
   const importInputRef = useRef(null);
   const today = state.logs[selectedDate] || { completed: [] };
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(state)), [state]);
+  useEffect(() => localStorage.setItem(QUEST_COMPLETION_KEY, JSON.stringify(questCompletions)), [questCompletions]);
   useEffect(() => {
     if (profile) localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
     else localStorage.removeItem(PROFILE_KEY);
@@ -414,18 +503,23 @@ function App() {
   }, [note, selectedDate]);
 
   const stats = useMemo(() => {
-    const totalXp = Object.values(state.logs).reduce((sum, log) => sum + logXp(log, state.habits), 0);
+    const baseXp = Object.values(state.logs).reduce((sum, log) => sum + logXp(log, state.habits), 0);
+    const questXp = questBonusXp(questCompletions);
+    const totalXp = baseXp + questXp;
     const completedToday = today.completed.length;
     const totalToday = state.habits.length || 1;
     const dailyPercent = Math.round((completedToday / totalToday) * 100);
     const activeDays = Object.values(state.logs).filter(isProtectedLog).length;
     const spentXp = redemptionSpent(state.redemptions || []);
-    return { totalXp, spentXp, rewardBalance: Math.max(0, totalXp - spentXp), completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
-  }, [state, today.completed.length]);
+    return { totalXp, questXp, spentXp, rewardBalance: Math.max(0, totalXp - spentXp), completedToday, totalToday, dailyPercent, activeDays, streak: getStreak(state.logs), level: getLevel(totalXp) };
+  }, [state, today.completed.length, questCompletions]);
 
   const monthReport = useMemo(() => getMonthReport(state, visibleMonth), [state, visibleMonth]);
   const insights = useMemo(() => getInsights(state), [state]);
   const monthDays = useMemo(() => getMonthDays(visibleMonth), [visibleMonth]);
+  const quests = useMemo(() => getQuests(state, selectedDate), [state, selectedDate]);
+  const dailyQuestKey = selectedDate;
+  const weeklyQuestKey = weekKeyFromDateKey(selectedDate);
 
   const achievements = [
     { icon: Flame, label: 'Streak 3 hari', done: stats.streak >= 3 },
@@ -541,6 +635,18 @@ function App() {
         logs: { ...prev.logs, [selectedDate]: { ...log, completed: [], frozen: true, restDay: false } },
       };
     });
+  }
+
+  function claimQuest(tier, quest) {
+    const periodKey = tier === 'daily' ? dailyQuestKey : weeklyQuestKey;
+    if (!quest.done || questCompletions[tier]?.[periodKey]?.[quest.id]) return;
+    setQuestCompletions(prev => ({
+      ...prev,
+      [tier]: {
+        ...(prev[tier] || {}),
+        [periodKey]: { ...(prev[tier]?.[periodKey] || {}), [quest.id]: true },
+      },
+    }));
   }
 
   function changeMonth(offset) {
@@ -686,6 +792,15 @@ function App() {
           </form>
         </section>
 
+        <section className="panel quest-panel">
+          <div className="section-head compact">
+            <div><p className="eyebrow"><Target size={16}/> Quest bonus</p><h2>Misi harian & mingguan</h2></div>
+            <span className="quest-xp">+{stats.questXp} XP bonus terkumpul</span>
+          </div>
+          <QuestGroup title="Daily Quests" subtitle={`Reset lokal: ${dailyQuestKey}`} tier="daily" quests={quests.daily} completions={questCompletions.daily?.[dailyQuestKey] || {}} onClaim={claimQuest} />
+          <QuestGroup title="Weekly Quests" subtitle={`Reset minggu: ${weeklyQuestKey}`} tier="weekly" quests={quests.weekly} completions={questCompletions.weekly?.[weeklyQuestKey] || {}} onClaim={claimQuest} />
+        </section>
+
         <section className="panel calendar-panel">
           <div className="section-head compact">
             <div><p className="eyebrow">Kalender</p><h2>{visibleMonth}</h2></div>
@@ -819,6 +934,29 @@ function LoginScreen({ onLogin }) {
 
 function Stat({ icon: Icon, label, value }) {
   return <div className="stat panel"><Icon size={22}/><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function QuestGroup({ title, subtitle, tier, quests, completions, onClaim }) {
+  return <div className="quest-group">
+    <div className="quest-group-head"><div><h3>{title}</h3><small>{subtitle}</small></div><strong>+{QUEST_BONUS_BY_TIER[tier]} XP/quest</strong></div>
+    <div className="quest-list">
+      {quests.map(quest => {
+        const claimed = Boolean(completions[quest.id]);
+        const percent = Math.min(100, Math.round((quest.progress / quest.target) * 100));
+        return <article className={`quest-card ${quest.done ? 'ready' : ''} ${claimed ? 'claimed' : ''}`} key={quest.id}>
+          <div className="quest-copy">
+            <strong>{quest.title}</strong>
+            <span>{quest.description}</span>
+            <small>{quest.progress}/{quest.target} selesai</small>
+          </div>
+          <div className="quest-meter"><span style={{ width: `${percent}%` }} /></div>
+          <button className="ghost" type="button" disabled={!quest.done || claimed} onClick={() => onClaim(tier, quest)}>
+            {claimed ? 'XP claimed' : quest.done ? 'Claim XP' : 'In progress'}
+          </button>
+        </article>;
+      })}
+    </div>
+  </div>;
 }
 
 function Report({ label, value }) {
