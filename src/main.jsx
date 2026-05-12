@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Award,
@@ -27,6 +27,7 @@ import './styles.css';
 const STORAGE_KEY = 'daily-progress-lab:v2';
 const LEGACY_STORAGE_KEY = 'daily-progress-lab:v1';
 const PROFILE_KEY = 'daily-progress-lab:profile';
+const BACKUP_VERSION = 1;
 const dayMs = 24 * 60 * 60 * 1000;
 const DEFAULT_FREEZE_COUNT = 2;
 const REST_DAY_XP = 5;
@@ -77,6 +78,54 @@ function loadProfile() {
   const parsed = loadJson(PROFILE_KEY);
   if (parsed?.name && parsed?.email) return parsed;
   return null;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateBackup(payload) {
+  if (!isPlainObject(payload)) return 'File backup harus berupa JSON object.';
+  if (payload.app !== 'daily-progress-lab') return 'File ini bukan backup Daily Progress Lab.';
+  if (payload.version !== BACKUP_VERSION) return `Versi backup tidak didukung: ${payload.version ?? 'kosong'}.`;
+  if (!isPlainObject(payload.data)) return 'Data backup tidak lengkap.';
+
+  const { profile, state } = payload.data;
+  if (profile !== null && (!isPlainObject(profile) || typeof profile.name !== 'string' || typeof profile.email !== 'string')) {
+    return 'Profil di file backup tidak valid.';
+  }
+  if (!isPlainObject(state)) return 'State progress di file backup tidak valid.';
+  if (!Array.isArray(state.habits)) return 'Daftar habit di file backup tidak valid.';
+  if (!isPlainObject(state.logs)) return 'Riwayat progress di file backup tidak valid.';
+  if (state.notes !== undefined && !isPlainObject(state.notes)) return 'Catatan di file backup tidak valid.';
+  if (state.freezeCount !== undefined && !Number.isFinite(state.freezeCount)) return 'Jumlah streak freeze di file backup tidak valid.';
+  if (state.rewards !== undefined && !Array.isArray(state.rewards)) return 'Daftar reward di file backup tidak valid.';
+  if (state.redemptions !== undefined && !Array.isArray(state.redemptions)) return 'Riwayat redeem di file backup tidak valid.';
+
+  const invalidHabit = state.habits.some(habit => !isPlainObject(habit) || typeof habit.id !== 'string' || typeof habit.title !== 'string' || !Number.isFinite(habit.points));
+  if (invalidHabit) return 'Ada habit di file backup yang tidak valid.';
+
+  const invalidReward = (state.rewards || []).some(reward => !isPlainObject(reward) || typeof reward.id !== 'string' || typeof reward.name !== 'string' || !Number.isFinite(reward.cost));
+  if (invalidReward) return 'Ada reward di file backup yang tidak valid.';
+
+  const invalidLog = Object.entries(state.logs).some(([date, log]) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isPlainObject(log)) return true;
+    return !Array.isArray(log.completed) || log.completed.some(id => typeof id !== 'string');
+  });
+  if (invalidLog) return 'Ada riwayat progress di file backup yang tidak valid.';
+
+  return null;
+}
+
+function normalizeBackupState(importedState) {
+  return {
+    habits: importedState.habits,
+    logs: importedState.logs,
+    notes: importedState.notes || {},
+    freezeCount: Number.isFinite(importedState.freezeCount) ? importedState.freezeCount : DEFAULT_FREEZE_COUNT,
+    rewards: Array.isArray(importedState.rewards) ? importedState.rewards : defaultRewards,
+    redemptions: Array.isArray(importedState.redemptions) ? importedState.redemptions : [],
+  };
 }
 
 function habitXp(habits, id) {
@@ -272,6 +321,8 @@ function App() {
   const [selectedDate, setSelectedDate] = useState(todayKey());
   const [visibleMonth, setVisibleMonth] = useState(monthKey(new Date()));
   const [note, setNote] = useState(state.notes[todayKey()] || '');
+  const [backupStatus, setBackupStatus] = useState('');
+  const importInputRef = useRef(null);
   const today = state.logs[selectedDate] || { completed: [] };
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(state)), [state]);
@@ -333,6 +384,58 @@ function App() {
     setSelectedDate(todayKey());
     setVisibleMonth(monthKey(new Date()));
     setNote('');
+    setBackupStatus('');
+  }
+
+  function exportBackup() {
+    const backup = {
+      app: 'daily-progress-lab',
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      data: { profile, state },
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `daily-progress-lab-backup-v${BACKUP_VERSION}-${todayKey()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setBackupStatus('Backup JSON berhasil dibuat. Simpan filenya baik-baik ya.');
+  }
+
+  async function importBackup(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    try {
+      const payload = JSON.parse(await file.text());
+      const error = validateBackup(payload);
+      if (error) {
+        setBackupStatus(error);
+        return;
+      }
+
+      const incomingState = normalizeBackupState(payload.data.state);
+      const incomingProfile = payload.data.profile;
+      const confirmed = confirm('Import backup akan menimpa profil dan semua data progress lokal saat ini. Lanjutkan?');
+      if (!confirmed) {
+        setBackupStatus('Import dibatalkan. Data lokal tidak diubah.');
+        return;
+      }
+
+      setProfile(incomingProfile);
+      setState(incomingState);
+      setSelectedDate(todayKey());
+      setVisibleMonth(monthKey(new Date()));
+      setNote(incomingState.notes[todayKey()] || '');
+      setBackupStatus('Import selesai. Data progress berhasil dipulihkan dari backup.');
+    } catch {
+      setBackupStatus('File tidak bisa dibaca sebagai JSON backup yang valid.');
+    }
   }
 
 
@@ -452,6 +555,20 @@ function App() {
       <section className="idea-strip panel">
         <strong>Ide roadmap berikutnya:</strong>
         <span>cloud login Google</span><span>multi project tracker</span><span>export PDF bulanan</span><span>reminder WhatsApp</span><span>leaderboard privat</span>
+      </section>
+
+      <section className="backup-panel panel">
+        <div>
+          <p className="eyebrow">Backup lokal v{BACKUP_VERSION}</p>
+          <h2>Export / Import Data</h2>
+          <p>Simpan atau pulihkan profil, habit, XP, badge, quest, dan riwayat progress dari file JSON.</p>
+          {backupStatus && <small className="backup-status">{backupStatus}</small>}
+        </div>
+        <div className="backup-actions">
+          <button className="ghost" type="button" onClick={exportBackup}>Export Data</button>
+          <button className="ghost" type="button" onClick={() => importInputRef.current?.click()}>Import Data</button>
+          <input ref={importInputRef} type="file" accept="application/json,.json" onChange={importBackup} hidden />
+        </div>
       </section>
 
       <section className="grid stats-grid five">
