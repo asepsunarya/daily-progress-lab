@@ -75,3 +75,15 @@ textarea { min-height: 188px; resize: vertical; margin-top: 16px; line-height: 1
 .login-form button { min-height: 52px; }
 @media (max-width: 980px) { .hero, .stats-grid, .main-grid, .lower-grid { grid-template-columns: 1fr; } .badges { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .shell { padding-top: 24px; width: min(100% - 20px, 1180px); } .add-form { grid-template-columns: 1fr; } .add-form button { padding: 14px 18px; } .section-head { align-items: flex-start; flex-direction: column; } .habit { grid-template-columns: auto 1fr auto; } .habit .check { display: none; } .badges, .report-grid { grid-template-columns: 1fr; } .calendar-cell { min-height: 44px; border-radius: 12px; } }
+.stats-grid.five { grid-template-columns: repeat(5, 1fr); }
+.protection-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.ghost.protection { width: auto; height: auto; min-height: 42px; }
+.ghost.protection.active.rest { background: rgba(245,158,11,.18); border-color: rgba(245,158,11,.5); color: #fde68a; }
+.ghost.protection.active.freeze { background: rgba(14,165,233,.18); border-color: rgba(56,189,248,.58); color: #bae6fd; }
+.ghost:disabled { opacity: .45; cursor: not-allowed; }
+.log-status { margin: 10px 0 0; color: #cbd5e1; font-size: .92rem; }
+.calendar-cell small { font-size: .68rem; color: #94a3b8; }
+.calendar-cell.rest { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.42); }
+.calendar-cell.frozen { background: rgba(14,165,233,.12); border-color: rgba(56,189,248,.48); }
+.calendar-cell.done { background: rgba(124,58,237,.12); }
+@media (max-width: 980px) { .stats-grid.five { grid-template-columns: 1fr; } }
